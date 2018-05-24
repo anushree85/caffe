@@ -41,7 +41,16 @@ message Datum {
 }
 
 message FillerParameter {
-  // The filler type.
+  // The filler type. Can be one of the following:
+  // constant, gaussian, positive_unitball, uniform, xavier,
+  // msra, bilinear, or their static versions:
+  // gaussianstatic, positive_unitballstatic, uniformstatic, 
+  // xavierstatic, msrastatic, bilinearstatic
+  // In the static version the random number generator is only
+  // called once, and subsequent calls to fill blob, will write
+  // the same random numbers as in the first call. This is done
+  // to save time in cases where having same random numbers does
+  // not make a difference.
   optional string type = 1 [default = 'constant'];
   optional float value = 2 [default = 0]; // the value in constant filler
   optional float min = 3 [default = 0]; // the min value in uniform filler
@@ -98,7 +107,7 @@ message NetParameter {
 // NOTE
 // Update the next available ID when you add a new SolverParameter field.
 //
-// SolverParameter next available ID: 42 (last added: layer_wise_reduce)
+// SolverParameter next available ID: 42 (last added: per_parameter_reduce)
 message SolverParameter {
   //////////////////////////////////////////////////////////////////////////////
   // Specifying the train and test networks
@@ -128,7 +137,8 @@ message SolverParameter {
   // The states for the train/test nets. Must be unspecified or
   // specified once per net.
   //
-  // By default, train_state will have phase = TRAIN,
+  // By default, all states will have solver = true;
+  // train_state will have phase = TRAIN,
   // and all test_state's will have phase = TEST.
   // Other defaults are set according to the NetState defaults.
   optional NetState train_state = 26;
@@ -218,7 +228,7 @@ message SolverParameter {
 
   // RMSProp decay value
   // MeanSquare(t) = rms_decay*MeanSquare(t-1) + (1-rms_decay)*SquareGradient(t)
-  optional float rms_decay = 38 [default = 0.99];
+  optional float rms_decay = 38;
 
   // If true, print information about the state of the net that may help with
   // debugging learning problems.
@@ -239,8 +249,8 @@ message SolverParameter {
   // DEPRECATED: use type instead of solver_type
   optional SolverType solver_type = 30 [default = SGD];
 
-  // Overlap compute and communication for data parallel training
-  optional bool layer_wise_reduce = 41 [default = true];
+  // Reduce parameter gradients individually
+  optional bool per_parameter_reduce = 41 [default = true];
 }
 
 // A message that stores the solver snapshots
@@ -308,7 +318,8 @@ message ParamSpec {
 // NOTE
 // Update the next available ID when you add a new LayerParameter field.
 //
-// LayerParameter next available layer-specific ID: 147 (last added: recurrent_param)
+// LayerParameter next available layer-specific ID: 145 (last added: crop_param)
+//                                                  200 (last added: gradient_scaler_param)
 message LayerParameter {
   optional string name = 1; // the layer name
   optional string type = 2; // the layer type
@@ -376,6 +387,7 @@ message LayerParameter {
   optional EmbedParameter embed_param = 137;
   optional ExpParameter exp_param = 111;
   optional FlattenParameter flatten_param = 135;
+  optional GradientScalerParameter gradient_scaler_param = 200;
   optional HDF5DataParameter hdf5_data_param = 112;
   optional HDF5OutputParameter hdf5_output_param = 113;
   optional HingeLossParameter hinge_loss_param = 114;
@@ -387,12 +399,10 @@ message LayerParameter {
   optional LRNParameter lrn_param = 118;
   optional MemoryDataParameter memory_data_param = 119;
   optional MVNParameter mvn_param = 120;
-  optional ParameterParameter parameter_param = 145;
   optional PoolingParameter pooling_param = 121;
   optional PowerParameter power_param = 122;
   optional PReLUParameter prelu_param = 131;
   optional PythonParameter python_param = 130;
-  optional RecurrentParameter recurrent_param = 146;
   optional ReductionParameter reduction_param = 136;
   optional ReLUParameter relu_param = 123;
   optional ReshapeParameter reshape_param = 133;
@@ -405,6 +415,10 @@ message LayerParameter {
   optional ThresholdParameter threshold_param = 128;
   optional TileParameter tile_param = 138;
   optional WindowDataParameter window_data_param = 129;
+
+  // NVIDIA PARAMETERS (Start with 68 because NV is 68 on an old-style phone)
+  optional DetectNetGroundTruthParameter detectnet_groundtruth_param = 6801;
+  optional DetectNetAugmentationParameter detectnet_augmentation_param = 6802;
 }
 
 // Message that stores parameters used to apply transformation
@@ -420,7 +434,7 @@ message TransformationParameter {
   optional uint32 crop_size = 3 [default = 0];
   // mean_file and mean_value cannot be specified at the same time
   optional string mean_file = 4;
-  // if specified can be repeated once (would subtract it from all the channels)
+  // if specified can be repeated once (would substract it from all the channels)
   // or can be repeated the same number of times as channels
   // (would subtract them from the corresponding channel)
   repeated float mean_value = 5;
@@ -429,6 +443,79 @@ message TransformationParameter {
   // Force the decoded image to have 1 color channels.
   optional bool force_gray = 7 [default = false];
 }
+// Message that stores parameters used to create gridbox ground truth
+message DetectNetGroundTruthParameter {
+  // stride of gridbox with respect to image size
+  optional uint32 stride = 1 [default = 4];
+  // coverage region scale with respect to bounding box size
+  optional float scale_cvg = 2 [default = 0.5];
+  enum GridboxType {
+    GRIDBOX_MAX = 0;
+    GRIDBOX_MIN = 1;
+  }
+  // determines coverage region's maximum and minimum dimensions
+  optional GridboxType gridbox_type = 3 [default = GRIDBOX_MAX];
+  // if gridbox_type is equal to GRIDBOX_MAX, the maximum size a given coverage
+  //  region may take.
+  optional uint32 max_cvg_len = 4 [default = 50];
+  // if gridbox_type is equal to GRIDBOX_MIN, the minimum size a given coverage
+  //  region may take.
+  optional uint32 min_cvg_len = 5 [default = 50];
+  enum CoverageType {
+    RECTANGULAR = 0;
+  }
+  // shape of the coverage geometry.
+  optional CoverageType coverage_type = 7 [default = RECTANGULAR];
+  // Size that incoming images are cropped / scaled to during training / test
+  //  time. The network will only see images of this size.
+  optional uint32 image_size_x = 8 [default = 1248];
+  optional uint32 image_size_y = 9 [default = 384];
+  // coverage proportional to the size of the gridbox region overlapping the
+  // normalize object coverage by the size of the object
+  optional bool obj_norm = 11 [default = false];
+  // crop incoming bboxes such that their bounds remain inside the gridbox.
+  optional bool crop_bboxes = 12 [default = true];
+  // Integer and target index of classes to be included:
+  message ClassMapping {
+    required uint32 src = 1;
+    required uint32 dst = 2;
+  }
+  repeated ClassMapping object_class = 13;
+}
+
+// Message that stores parameters used to apply image and label augmentations
+// specific to NVDataLayer's online augmentation module
+message DetectNetAugmentationParameter {
+  // probability that a random crop of the training image will be taken at test
+  //  time. If image dimensions are less than input size and random cropping is
+  //  off, then the image will be scaled deterministically to the input size.
+  optional float crop_prob = 1 [default = 1.0];
+  // number of pixels to shift the image by. If cropping is enabled, this number
+  //  is added to the range of possible crop offset values.
+  optional uint32 shift_x = 2 [default = 0];
+  optional uint32 shift_y = 3 [default = 0];
+  // probability that the training image will be scaled at test time. 0 turns
+  //  scale augmentation off.
+  optional float scale_prob = 4 [default = 0.33];
+  // minimum and maximum scaling factor. 1.0 implies no scaling.
+  optional float scale_min = 5 [default = 0.7];
+  optional float scale_max = 6 [default = 1.0];
+  // probability that image will be flipped across the Y axis. 0 turns flip
+  //  augmentation off.
+  optional float flip_prob = 7 [default = 0.33];
+  // maximum angle in degrees (in both directions) image may be rotated. 0 turns
+  //  rotation augmentation off.
+  optional float rotation_prob = 8 [default = 0.33];
+  optional float max_rotate_degree = 9 [default = 1.0];
+  // maximum rotation of hue in degrees (in both directions). 0 turns hue
+  //  augmentation off.
+  optional float hue_rotation_prob = 10 [default = 0.33];
+  optional float hue_rotation = 11 [default = 15];
+  // maximum desaturation parameter. 1.0 may convert RGB to luminance. 0 turns
+  //  desaturation augmentation off.
+  optional float desaturation_prob = 12 [default = 0.33];
+  optional float desaturation_max = 13 [default = 0.5];
+}
 
 // Message that stores parameters shared by loss layers
 message LossParameter {
@@ -436,7 +523,7 @@ message LossParameter {
   optional int32 ignore_label = 1;
   // How to normalize the loss for loss layers that aggregate across batches,
   // spatial dimensions, or other dimensions.  Currently only implemented in
-  // SoftmaxWithLoss and SigmoidCrossEntropyLoss layers.
+  // SoftmaxWithLoss layer.
   enum NormalizationMode {
     // Divide by the number of examples in the batch times spatial dimensions.
     // Outputs that receive the ignore label will NOT be ignored in computing
@@ -450,8 +537,6 @@ message LossParameter {
     // Do not normalize the loss.
     NONE = 3;
   }
-  // For historical reasons, the default normalization for
-  // SigmoidCrossEntropyLoss is BATCH_SIZE and *not* VALID.
   optional NormalizationMode normalization = 3 [default = VALID];
   // Deprecated.  Ignored if normalization is specified.  If normalization
   // is not specified, then setting this to false will be equivalent to
@@ -502,25 +587,23 @@ message ConcatParameter {
 }
 
 message BatchNormParameter {
-  // If false, normalization is performed over the current mini-batch
-  // and global statistics are accumulated (but not yet used) by a moving
-  // average.
-  // If true, those accumulated mean and variance values are used for the
-  // normalization.
-  // By default, it is set to false when the network is in the training
-  // phase and true when the network is in the testing phase.
+  // If false, accumulate global mean/variance values via a moving average. If
+  // true, use those accumulated values instead of computing mean/variance
+  // across the batch.
   optional bool use_global_stats = 1;
-  // What fraction of the moving average remains each iteration?
-  // Smaller values make the moving average decay faster, giving more
-  // weight to the recent values.
-  // Each iteration updates the moving average @f$S_{t-1}@f$ with the
-  // current mean @f$ Y_t @f$ by
-  // @f$ S_t = (1-\beta)Y_t + \beta \cdot S_{t-1} @f$, where @f$ \beta @f$
-  // is the moving_average_fraction parameter.
+  // How much does the moving average decay each iteration?
   optional float moving_average_fraction = 2 [default = .999];
   // Small value to add to the variance estimate so that we don't divide by
   // zero.
   optional float eps = 3 [default = 1e-5];
+  optional FillerParameter scale_filler = 5;
+  optional FillerParameter bias_filler = 6;
+  enum Engine {
+    DEFAULT = 0;
+    CAFFE = 1;
+    CUDNN = 2;
+  }
+  optional Engine engine = 15 [default = DEFAULT];
 }
 
 message BiasParameter {
@@ -618,6 +701,12 @@ message ConvolutionParameter {
   // implementation; for input blobs with num_axes != 2, this option is
   // ignored and the ND implementation will be used.)
   optional bool force_nd_im2col = 17 [default = false];
+  enum CuDNNConvolutionAlgorithmSeeker {
+    GET    = 0;
+    FINDEX = 1;
+  }
+  //Specifies which cudnn routine should be used to find the best convolution algorithm
+  optional CuDNNConvolutionAlgorithmSeeker cudnn_convolution_algo_seeker = 19 [default = FINDEX];
 }
 
 message CropParameter {
@@ -667,9 +756,12 @@ message DataParameter {
   optional bool mirror = 6 [default = false];
   // Force the encoded image to have 3 color channels
   optional bool force_encoded_color = 9 [default = false];
-  // Prefetch queue (Increase if data feeding bandwidth varies, within the
-  // limit of device memory for GPU training)
+  // Prefetch queue (Number of batches to prefetch to host memory, increase if
+  // data access bandwidth varies).
   optional uint32 prefetch = 10 [default = 4];
+  // Number of processing threads.  0 means use defaults. 1 thread for CPU or
+  // cpu logical cores / number of GPUs
+  optional uint32 threads  = 11 [default = 0];
 }
 
 message DropoutParameter {
@@ -753,6 +845,17 @@ message FlattenParameter {
   optional int32 end_axis = 2 [default = -1];
 }
 
+// Message that stores parameters used by GradientScalerLayer
+message GradientScalerParameter {
+  // GradientScalerLayer scales deltas according to the schedule:
+  // 2 * height / (1 + exp(-alpha * (iter / max_iter))) - upper_bound ,
+  // where height = upper_bound - lower_bound
+  optional float lower_bound = 1 [default = 0.0];
+  optional float upper_bound = 2 [default = 1.0];
+  optional float alpha = 3 [default = 10.0];
+  optional float max_iter = 4 [default = 1];
+}
+
 // Message that stores parameters used by HDF5DataLayer
 message HDF5DataParameter {
   // Specify the data source.
@@ -815,7 +918,6 @@ message ImageDataParameter {
 message InfogainLossParameter {
   // Specify the infogain matrix source.
   optional string source = 1;
-  optional int32 axis = 2 [default = 1]; // axis of prob
 }
 
 message InnerProductParameter {
@@ -890,10 +992,6 @@ message MVNParameter {
   optional float eps = 3 [default = 1e-9];
 }
 
-message ParameterParameter {
-  optional BlobShape shape = 1;
-}
-
 message PoolingParameter {
   enum PoolMethod {
     MAX = 0;
@@ -938,27 +1036,10 @@ message PythonParameter {
   // string, dictionary in Python dict format, JSON, etc. You may parse this
   // string in `setup` method and use it in `forward` and `backward`.
   optional string param_str = 3 [default = ''];
-  // DEPRECATED
+  // Whether this PythonLayer is shared among worker solvers during data parallelism.
+  // If true, each worker solver sequentially run forward from this layer.
+  // This value should be set true if you are using it as a data layer.
   optional bool share_in_parallel = 4 [default = false];
-}
-
-// Message that stores parameters used by RecurrentLayer
-message RecurrentParameter {
-  // The dimension of the output (and usually hidden state) representation --
-  // must be explicitly set to non-zero.
-  optional uint32 num_output = 1 [default = 0];
-
-  optional FillerParameter weight_filler = 2; // The filler for the weight
-  optional FillerParameter bias_filler = 3; // The filler for the bias
-
-  // Whether to enable displaying debug_info in the unrolled recurrent net.
-  optional bool debug_info = 4 [default = false];
-
-  // Whether to add as additional inputs (bottoms) the initial hidden state
-  // blobs, and add as additional outputs (tops) the final timestep hidden state
-  // blobs.  The number of additional bottom/top blobs required depends on the
-  // recurrent architecture -- e.g., 1 for RNNs, 2 for LSTMs.
-  optional bool expose_hidden = 5 [default = false];
 }
 
 // Message that stores parameters used by ReductionLayer
@@ -1407,6 +1488,6 @@ message PReLUParameter {
 
   // Initial value of a_i. Default is a_i=0.25 for all i.
   optional FillerParameter filler = 1;
-  // Whether or not slope parameters are shared across channels.
+  // Whether or not slope paramters are shared across channels.
   optional bool channel_shared = 2 [default = false];
 }

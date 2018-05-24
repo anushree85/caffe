@@ -33,6 +33,16 @@ template <typename Dtype>
 void caffe_cpu_axpby(const int N, const Dtype alpha, const Dtype* X,
     const Dtype beta, Dtype* Y);
 
+// y[i] = max(a * x[i], b * y[i])
+template <typename Dtype>
+void caffe_cpu_eltwise_max(const int N, const Dtype alpha, const Dtype* X,
+    const Dtype beta, Dtype* Y);
+
+// y[i] = min(a * x[i], b * y[i])
+template <typename Dtype>
+void caffe_cpu_eltwise_min(const int N, const Dtype alpha, const Dtype* X,
+    const Dtype beta, Dtype* Y);
+
 template <typename Dtype>
 void caffe_copy(const int N, const Dtype *X, Dtype *Y);
 
@@ -51,9 +61,6 @@ void caffe_scal(const int N, const Dtype alpha, Dtype *X);
 
 template <typename Dtype>
 void caffe_sqr(const int N, const Dtype* a, Dtype* y);
-
-template <typename Dtype>
-void caffe_sqrt(const int N, const Dtype* a, Dtype* y);
 
 template <typename Dtype>
 void caffe_add(const int N, const Dtype* a, const Dtype* b, Dtype* y);
@@ -131,16 +138,16 @@ inline int8_t caffe_sign(Dtype val) {
   }
 
 // output is 1 for the positives, 0 for zero, and -1 for the negatives
-DEFINE_CAFFE_CPU_UNARY_FUNC(sign, y[i] = caffe_sign<Dtype>(x[i]))
+DEFINE_CAFFE_CPU_UNARY_FUNC(sign, y[i] = caffe_sign<Dtype>(x[i]));
 
 // This returns a nonzero value if the input has its sign bit set.
 // The name sngbit is meant to avoid conflicts with std::signbit in the macro.
 // The extra parens are needed because CUDA < 6.5 defines signbit as a macro,
 // and we don't want that to expand here when CUDA headers are also included.
 DEFINE_CAFFE_CPU_UNARY_FUNC(sgnbit, \
-    y[i] = static_cast<bool>((std::signbit)(x[i])))
+    y[i] = static_cast<bool>((std::signbit)(x[i])));
 
-DEFINE_CAFFE_CPU_UNARY_FUNC(fabs, y[i] = std::fabs(x[i]))
+DEFINE_CAFFE_CPU_UNARY_FUNC(fabs, y[i] = std::fabs(x[i]));
 
 template <typename Dtype>
 void caffe_cpu_scale(const int n, const Dtype alpha, const Dtype *x, Dtype* y);
@@ -186,7 +193,7 @@ template <typename Dtype>
 void caffe_gpu_add_scalar(const int N, const Dtype alpha, Dtype *X);
 
 template <typename Dtype>
-void caffe_gpu_scal(const int N, const Dtype alpha, Dtype *X);
+void caffe_gpu_scal(const int N, const Dtype alpha, Dtype* X);
 
 #ifndef CPU_ONLY
 template <typename Dtype>
@@ -216,9 +223,6 @@ void caffe_gpu_log(const int n, const Dtype* a, Dtype* y);
 
 template <typename Dtype>
 void caffe_gpu_powx(const int n, const Dtype* a, const Dtype b, Dtype* y);
-
-template <typename Dtype>
-void caffe_gpu_sqrt(const int n, const Dtype* a, Dtype* y);
 
 // caffe_gpu_rng_uniform with two arguments generates integers in the range
 // [0, UINT_MAX].
@@ -256,6 +260,17 @@ void caffe_gpu_fabs(const int n, const Dtype* x, Dtype* y);
 
 template <typename Dtype>
 void caffe_gpu_scale(const int n, const Dtype alpha, const Dtype *x, Dtype* y);
+
+// y[i] = max(a * x[i], b * y[i])
+template <typename Dtype>
+void caffe_gpu_eltwise_max(const int n, const Dtype alpha, const Dtype* x,
+    const Dtype beta, Dtype* y);
+
+// y[i] = min(a * x[i], b * y[i])
+template <typename Dtype>
+void caffe_gpu_eltwise_min(const int n, const Dtype alpha, const Dtype* x,
+    const Dtype beta, Dtype* y);
+
 
 #define DEFINE_AND_INSTANTIATE_GPU_UNARY_FUNC(name, operation) \
 template<typename Dtype> \

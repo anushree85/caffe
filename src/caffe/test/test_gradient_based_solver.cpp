@@ -28,7 +28,7 @@ class GradientBasedSolverTest : public MultiDeviceTest<TypeParam> {
       seed_(1701), num_(4), channels_(3), height_(10), width_(10),
       share_(false) {
         input_file_ = new string(
-        ABS_TEST_DATA_DIR "/solver_data_list.txt");
+        CMAKE_SOURCE_DIR "caffe/test/test_data/solver_data_list.txt" CMAKE_EXT);
       }
   ~GradientBasedSolverTest() {
     delete input_file_;
@@ -36,9 +36,6 @@ class GradientBasedSolverTest : public MultiDeviceTest<TypeParam> {
 
   string snapshot_prefix_;
   shared_ptr<SGDSolver<Dtype> > solver_;
-#ifdef USE_NCCL
-  shared_ptr<NCCL<Dtype> > nccl_;
-#endif
   int seed_;
   // Dimensions are determined by generate_sample_data.py
   // TODO this is brittle and the hdf5 file should be checked instead.
@@ -49,11 +46,13 @@ class GradientBasedSolverTest : public MultiDeviceTest<TypeParam> {
   // Test data: check out generate_sample_data.py in the same directory.
   string* input_file_;
 
+  virtual const char* solver_type() = 0;
   virtual void InitSolver(const SolverParameter& param) = 0;
 
   virtual void InitSolverFromProtoString(const string& proto) {
     SolverParameter param;
     CHECK(google::protobuf::TextFormat::ParseFromString(proto, &param));
+    param.set_type(solver_type());
     // Set the solver_mode according to current Caffe::mode.
     switch (Caffe::mode()) {
       case Caffe::CPU:
@@ -87,7 +86,6 @@ class GradientBasedSolverTest : public MultiDeviceTest<TypeParam> {
        "lr_policy: 'fixed' "
        "iter_size: " << iter_size << " "
        "device_id: " << device_id << " "
-       "layer_wise_reduce: " << (!share_) << " "
        "net_param { "
        "  name: 'TestNetwork' "
        "  layer { "
@@ -186,7 +184,7 @@ class GradientBasedSolverTest : public MultiDeviceTest<TypeParam> {
     }
     Caffe::set_random_seed(this->seed_);
     this->InitSolverFromProtoString(proto.str());
-    if (from_snapshot) {
+    if (from_snapshot != NULL) {
       this->solver_->Restore(from_snapshot);
       for (int i = 0; i < this->solver_->iter(); ++i) {
         this->solver_->net()->Forward();
@@ -205,10 +203,9 @@ class GradientBasedSolverTest : public MultiDeviceTest<TypeParam> {
           gpus.push_back(i);
       }
       Caffe::set_solver_count(gpus.size());
-#ifdef USE_NCCL
-      this->nccl_.reset(new NCCL<Dtype>(this->solver_));
-      this->nccl_->Run(gpus, from_snapshot);
-#endif
+      P2PSync<Dtype> sync(this->solver_, 0, gpus.size(),
+          this->solver_->param());
+      sync.Run(gpus);
       Caffe::set_solver_count(1);
     }
     if (snapshot) {
@@ -457,35 +454,20 @@ class GradientBasedSolverTest : public MultiDeviceTest<TypeParam> {
   void TestLeastSquaresUpdate(const Dtype learning_rate = 1.0,
       const Dtype weight_decay = 0.0, const Dtype momentum = 0.0,
       const int iter_to_check = 0) {
-    const int kNum = num_;
     const int kIterSize = 1;
+    const int kNum = num_;
     // Test over all numbers of devices.
-    int available_devices = 1;
-#ifdef USE_NCCL
-    if (Caffe::mode() == Caffe::GPU) {
-      CUDA_CHECK(cudaGetDeviceCount(&available_devices));
-    }
-#endif
-    // Takes a while to test all sizes for each test so sparse
-    vector<int> sizes;
-    sizes.push_back(1);
-    if (available_devices >= 2) {
-      sizes.push_back(2);
-    }
-    if (available_devices >= 3) {
-      sizes.push_back(3);
-    }
-    if (available_devices >= 8) {
-      sizes.push_back(8);
-    }
-    if (available_devices >= 16) {
-      sizes.push_back(16);
-    }
-    for (int i = 0; i < sizes.size(); ++i) {
-      int devices = sizes[i];
+    //    int available_devices = 1;
+    // #ifndef CPU_ONLY
+    //    if (Caffe::mode() == Caffe::GPU) {
+    //      CUDA_CHECK(cudaGetDeviceCount(&available_devices));
+    //    }
+    // #endif
+    // TODO temporarily set to single GPU mode due to issues on some HW.
+    for (int devices = 1; devices <= 1 /*available_devices*/; ++devices) {
       // Configure batch size for single / multi device equivalence.
       // Constant data is needed for multi device as for accumulation.
-      num_ = kNum * devices;
+      num_ = kNum * devices * devices;
 
       // Initialize the solver and run K (= iter_to_check) solver iterations
       // (on single device).
@@ -498,12 +480,15 @@ class GradientBasedSolverTest : public MultiDeviceTest<TypeParam> {
           iter_to_check + 1, &updated_params);
 
       // Reinitialize the solver and run K+1 solver iterations.
-      num_ = kNum;
+      num_ = kNum * devices;
       RunLeastSquaresSolver(learning_rate, weight_decay, momentum,
           iter_to_check + 1, kIterSize, devices);
 
       // Check that the solver's solution matches ours.
       CheckLeastSquaresUpdate(updated_params);
+
+      // Reset initial value of num_
+      num_ = kNum;
     }
   }
 
@@ -558,12 +543,12 @@ class GradientBasedSolverTest : public MultiDeviceTest<TypeParam> {
     const vector<Blob<Dtype>*>& params = solver_->net()->learnable_params();
     for (int i = 0; i < params.size(); ++i) {
       for (int j = 0; j < params[i]->count(); ++j) {
-        EXPECT_FLOAT_EQ(param_copies[i]->cpu_data()[j],
-            params[i]->cpu_data()[j])
-            << "param " << i << " data differed at dim " << j;
-        EXPECT_FLOAT_EQ(param_copies[i]->cpu_diff()[j],
-            params[i]->cpu_diff()[j])
-            << "param " << i << " diff differed at dim " << j;
+        Dtype rel_error = Dtype(std::max(1., fabs(params[i]->cpu_data()[j])) *
+            1.e-5);
+        EXPECT_NEAR(param_copies[i]->cpu_data()[j], params[i]->cpu_data()[j],
+            rel_error) << "param " << i << " data differed at dim " << j;
+        EXPECT_NEAR(param_copies[i]->cpu_diff()[j], params[i]->cpu_diff()[j],
+            rel_error) << "param " << i << " diff differed at dim " << j;
       }
     }
 
@@ -571,12 +556,12 @@ class GradientBasedSolverTest : public MultiDeviceTest<TypeParam> {
     const vector<shared_ptr<Blob<Dtype> > >& history = solver_->history();
     for (int i = 0; i < history.size(); ++i) {
       for (int j = 0; j < history[i]->count(); ++j) {
-        EXPECT_FLOAT_EQ(history_copies[i]->cpu_data()[j],
-            history[i]->cpu_data()[j])
-            << "history blob " << i << " data differed at dim " << j;
-        EXPECT_FLOAT_EQ(history_copies[i]->cpu_diff()[j],
-            history[i]->cpu_diff()[j])
-            << "history blob " << i << " diff differed at dim " << j;
+        Dtype rel_error = Dtype(std::max(1., fabs(history[i]->cpu_data()[j])) *
+            1.e-5);
+        EXPECT_NEAR(history_copies[i]->cpu_data()[j], history[i]->cpu_data()[j],
+            rel_error) << "history blob " << i << " data differed at dim " << j;
+        EXPECT_NEAR(history_copies[i]->cpu_diff()[j], history[i]->cpu_diff()[j],
+            rel_error) << "history blob " << i << " diff differed at dim " << j;
       }
     }
   }
@@ -590,6 +575,9 @@ class SGDSolverTest : public GradientBasedSolverTest<TypeParam> {
  protected:
   virtual void InitSolver(const SolverParameter& param) {
     this->solver_.reset(new SGDSolver<Dtype>(param));
+  }
+  virtual const char *solver_type() {
+    return "SGD";
   }
 };
 
@@ -727,6 +715,9 @@ class AdaGradSolverTest : public GradientBasedSolverTest<TypeParam> {
   virtual void InitSolver(const SolverParameter& param) {
     this->solver_.reset(new AdaGradSolver<Dtype>(param));
   }
+  virtual const char *solver_type() {
+    return "AdaGrad";
+  }
 };
 
 TYPED_TEST_CASE(AdaGradSolverTest, TestDtypesAndDevices);
@@ -826,6 +817,9 @@ class NesterovSolverTest : public GradientBasedSolverTest<TypeParam> {
  protected:
   virtual void InitSolver(const SolverParameter& param) {
     this->solver_.reset(new NesterovSolver<Dtype>(param));
+  }
+  virtual const char *solver_type() {
+    return "Nesterov";
   }
 };
 
@@ -959,6 +953,9 @@ class AdaDeltaSolverTest : public GradientBasedSolverTest<TypeParam> {
  protected:
   virtual void InitSolver(const SolverParameter& param) {
     this->solver_.reset(new AdaDeltaSolver<Dtype>(param));
+  }
+  virtual const char *solver_type() {
+    return "AdaDelta";
   }
 };
 
@@ -1094,6 +1091,9 @@ class AdamSolverTest : public GradientBasedSolverTest<TypeParam> {
     new_param.set_momentum2(momentum2);
     this->solver_.reset(new AdamSolver<Dtype>(new_param));
   }
+  virtual const char *solver_type() {
+    return "Adam";
+  }
 };
 
 TYPED_TEST_CASE(AdamSolverTest, TestDtypesAndDevices);
@@ -1193,6 +1193,9 @@ class RMSPropSolverTest : public GradientBasedSolverTest<TypeParam> {
     SolverParameter new_param = param;
     new_param.set_rms_decay(rms_decay);
     this->solver_.reset(new RMSPropSolver<Dtype>(new_param));
+  }
+  virtual const char *solver_type() {
+    return "RMSProp";
   }
 };
 

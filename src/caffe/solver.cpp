@@ -8,6 +8,7 @@
 #include "caffe/util/hdf5.hpp"
 #include "caffe/util/io.hpp"
 #include "caffe/util/upgrade_proto.hpp"
+#include "caffe/messenger.hpp"
 
 namespace caffe {
 
@@ -26,14 +27,16 @@ SolverAction::Enum Solver<Dtype>::GetRequestedAction() {
 }
 
 template <typename Dtype>
-Solver<Dtype>::Solver(const SolverParameter& param)
-    : net_(), callbacks_(), requested_early_exit_(false) {
+Solver<Dtype>::Solver(const SolverParameter& param, const Solver* root_solver)
+    : net_(), callbacks_(), root_solver_(root_solver),
+      requested_early_exit_(false), iteration_timer_(), iterations_last_() {
   Init(param);
 }
 
 template <typename Dtype>
-Solver<Dtype>::Solver(const string& param_file)
-    : net_(), callbacks_(), requested_early_exit_(false) {
+Solver<Dtype>::Solver(const string& param_file, const Solver* root_solver)
+    : net_(), callbacks_(), root_solver_(root_solver),
+      requested_early_exit_(false), iteration_timer_(), iterations_last_() {
   SolverParameter param;
   ReadSolverParamsFromTextFileOrDie(param_file, &param);
   Init(param);
@@ -41,18 +44,20 @@ Solver<Dtype>::Solver(const string& param_file)
 
 template <typename Dtype>
 void Solver<Dtype>::Init(const SolverParameter& param) {
+  CHECK(Caffe::root_solver() || root_solver_)
+      << "root_solver_ needs to be set for all non-root solvers";
   LOG_IF(INFO, Caffe::root_solver()) << "Initializing solver from parameters: "
     << std::endl << param.DebugString();
   param_ = param;
   CHECK_GE(param_.average_loss(), 1) << "average_loss should be non-negative.";
   CheckSnapshotWritePermissions();
-  if (param_.random_seed() >= 0) {
-    Caffe::set_random_seed(param_.random_seed() + Caffe::solver_rank());
+  if (Caffe::root_solver() && param_.random_seed() >= 0) {
+    Caffe::set_random_seed(param_.random_seed());
   }
   // Scaffolding code
   InitTrainNet();
-  InitTestNets();
   if (Caffe::root_solver()) {
+    InitTestNets();
     LOG(INFO) << "Solver scaffolding done.";
   }
   iter_ = 0;
@@ -97,11 +102,16 @@ void Solver<Dtype>::InitTrainNet() {
   net_state.MergeFrom(net_param.state());
   net_state.MergeFrom(param_.train_state());
   net_param.mutable_state()->CopyFrom(net_state);
-  net_.reset(new Net<Dtype>(net_param));
+  if (Caffe::root_solver()) {
+    net_.reset(new Net<Dtype>(net_param));
+  } else {
+    net_.reset(new Net<Dtype>(net_param, root_solver_->net_.get()));
+  }
 }
 
 template <typename Dtype>
 void Solver<Dtype>::InitTestNets() {
+  CHECK(Caffe::root_solver());
   const bool has_net_param = param_.has_net_param();
   const bool has_net_file = param_.has_net();
   const int num_generic_nets = has_net_param + has_net_file;
@@ -171,7 +181,12 @@ void Solver<Dtype>::InitTestNets() {
     net_params[i].mutable_state()->CopyFrom(net_state);
     LOG(INFO)
         << "Creating test net (#" << i << ") specified by " << sources[i];
-    test_nets_[i].reset(new Net<Dtype>(net_params[i]));
+    if (Caffe::root_solver()) {
+      test_nets_[i].reset(new Net<Dtype>(net_params[i]));
+    } else {
+      test_nets_[i].reset(new Net<Dtype>(net_params[i],
+          root_solver_->test_nets_[i].get()));
+    }
     test_nets_[i]->set_debug_info(param_.debug_info());
   }
 }
@@ -185,7 +200,19 @@ void Solver<Dtype>::Step(int iters) {
   smoothed_loss_ = 0;
   iteration_timer_.Start();
 
+  for (int i = 0; i < callbacks_.size(); ++i) {
+    // we need to sync all threads before starting, otherwise some cuda init,
+    // malloc or other cuda stuff could interlock with in-loop cuda GPU sync
+    // called in on_start.
+    callbacks_[i]->soft_barrier();
+    // Initial bcast of parameters
+    callbacks_[i]->on_start();
+  }
+
+  net_->SetSolver(this);
+
   while (iter_ < stop_iter) {
+    Messenger::SendMessage("SOLVER_ITER_CHANGED", &iter_);
     // zero-init the params
     net_->ClearParamDiffs();
     if (param_.test_interval() && iter_ % param_.test_interval() == 0
@@ -197,10 +224,9 @@ void Solver<Dtype>::Step(int iters) {
         // Break out of the while loop because stop was requested while testing.
         break;
       }
-    }
-
-    for (int i = 0; i < callbacks_.size(); ++i) {
-      callbacks_[i]->on_start();
+      for (int i = 0; i < callbacks_.size(); ++i) {
+        callbacks_[i]->soft_barrier();
+      }
     }
     const bool display = param_.display() && iter_ % param_.display() == 0;
     net_->set_debug_info(display && param_.debug_info());
@@ -217,7 +243,7 @@ void Solver<Dtype>::Step(int iters) {
       float per_s = (iter_ - iterations_last_) / (lapse ? lapse : 1);
       LOG_IF(INFO, Caffe::root_solver()) << "Iteration " << iter_
           << " (" << per_s << " iter/s, " << lapse << "s/"
-          << param_.display() << " iters), loss = " << smoothed_loss_;
+          << param_.display() <<" iter), loss = " << smoothed_loss_;
       iteration_timer_.Start();
       iterations_last_ = iter_;
       const vector<Blob<Dtype>*>& result = net_->output_blobs();
@@ -240,9 +266,17 @@ void Solver<Dtype>::Step(int iters) {
         }
       }
     }
+#ifndef CPU_ONLY
+    CUDA_CHECK(cudaStreamSynchronize(cudaStreamDefault));
+#endif
     for (int i = 0; i < callbacks_.size(); ++i) {
-      callbacks_[i]->on_gradients_ready();
+      callbacks_[i]->allreduce();
     }
+    // Make sure all gradient exchanges have finished in per-level scheme
+    for (int i = 0; i < callbacks_.size(); ++i) {
+      callbacks_[i]->syncCommStream();
+    }
+
     ApplyUpdate();
 
     // Increment the internal iter_ counter -- its value should always indicate
@@ -461,6 +495,7 @@ string Solver<Dtype>::SnapshotToHDF5() {
 
 template <typename Dtype>
 void Solver<Dtype>::Restore(const char* state_file) {
+  CHECK(Caffe::root_solver());
   string state_filename(state_file);
   if (state_filename.size() >= 3 &&
       state_filename.compare(state_filename.size() - 3, 3, ".h5") == 0) {

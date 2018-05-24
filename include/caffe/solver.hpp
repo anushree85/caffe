@@ -13,7 +13,7 @@ namespace caffe {
 /**
   * @brief Enumeration of actions that a client of the Solver may request by
   * implementing the Solver's action request function, which a
-  * client may optionally provide in order to request early termination
+  * a client may optionally provide in order to request early termination
   * or saving a snapshot without exiting. In the executable caffe, this
   * mechanism is used to allow the snapshot to be saved when stopping
   * execution with a SIGINT (Ctrl-C).
@@ -41,8 +41,9 @@ typedef boost::function<SolverAction::Enum()> ActionCallback;
 template <typename Dtype>
 class Solver {
  public:
-  explicit Solver(const SolverParameter& param);
-  explicit Solver(const string& param_file);
+  explicit Solver(const SolverParameter& param,
+      const Solver* root_solver = NULL);
+  explicit Solver(const string& param_file, const Solver* root_solver = NULL);
   void Init(const SolverParameter& param);
   void InitTrainNet();
   void InitTestNets();
@@ -72,13 +73,18 @@ class Solver {
   inline const vector<shared_ptr<Net<Dtype> > >& test_nets() {
     return test_nets_;
   }
-  int iter() const { return iter_; }
+  int iter() { return iter_; }
 
   // Invoked at specific points during an iteration
   class Callback {
+   public:
+    virtual void allreduce(int param_id) = 0;
+    virtual void syncCommStream() = 0;
+
    protected:
     virtual void on_start() = 0;
-    virtual void on_gradients_ready() = 0;
+    virtual void allreduce() = 0;
+    virtual void soft_barrier() = 0;
 
     template <typename T>
     friend class Solver;
@@ -118,6 +124,10 @@ class Solver {
   vector<Dtype> losses_;
   Dtype smoothed_loss_;
 
+  // The root solver that holds root nets (actually containing shared layers)
+  // in data parallelism
+  const Solver* const root_solver_;
+
   // A function that can be set by a client of the Solver to provide indication
   // that it wants a snapshot saved and/or to exit early.
   ActionCallback action_request_function_;
@@ -125,11 +135,35 @@ class Solver {
   // True iff a request to stop early was received.
   bool requested_early_exit_;
 
-  // Timing information, handy to tune e.g. nbr of GPUs
+  // Timing information
   Timer iteration_timer_;
   float iterations_last_;
 
   DISABLE_COPY_AND_ASSIGN(Solver);
+};
+
+/**
+ * @brief Solver that only computes gradients, used as worker
+ *        for multi-GPU training.
+ */
+template <typename Dtype>
+class WorkerSolver : public Solver<Dtype> {
+ public:
+  explicit WorkerSolver(const SolverParameter& param,
+      const Solver<Dtype>* root_solver = NULL)
+      : Solver<Dtype>(param, root_solver) {}
+
+ protected:
+  void ApplyUpdate() {}
+  void SnapshotSolverState(const string& model_filename) {
+    LOG(FATAL) << "Should not be called on worker solver.";
+  }
+  void RestoreSolverStateFromBinaryProto(const string& state_file) {
+    LOG(FATAL) << "Should not be called on worker solver.";
+  }
+  void RestoreSolverStateFromHDF5(const string& state_file) {
+    LOG(FATAL) << "Should not be called on worker solver.";
+  }
 };
 
 }  // namespace caffe

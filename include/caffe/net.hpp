@@ -14,6 +14,9 @@
 
 namespace caffe {
 
+template <typename Dtype>
+class Solver;
+
 /**
  * @brief Connects Layer%s together into a directed acyclic graph (DAG)
  *        specified by a NetParameter.
@@ -23,9 +26,9 @@ namespace caffe {
 template <typename Dtype>
 class Net {
  public:
-  explicit Net(const NetParameter& param);
+  explicit Net(const NetParameter& param, const Net* root_net = NULL);
   explicit Net(const string& param_file, Phase phase,
-      const int level = 0, const vector<string>* stages = NULL);
+      const Net* root_net = NULL);
   virtual ~Net() {}
 
   /// @brief Initialize a network with a NetParameter.
@@ -227,29 +230,9 @@ class Net {
   static bool StateMeetsRule(const NetState& state, const NetStateRule& rule,
       const string& layer_name);
 
-  // Invoked at specific points during an iteration
-  class Callback {
-   protected:
-    virtual void run(int layer) = 0;
-
-    template <typename T>
-    friend class Net;
-  };
-  const vector<Callback*>& before_forward() const { return before_forward_; }
-  void add_before_forward(Callback* value) {
-    before_forward_.push_back(value);
-  }
-  const vector<Callback*>& after_forward() const { return after_forward_; }
-  void add_after_forward(Callback* value) {
-    after_forward_.push_back(value);
-  }
-  const vector<Callback*>& before_backward() const { return before_backward_; }
-  void add_before_backward(Callback* value) {
-    before_backward_.push_back(value);
-  }
-  const vector<Callback*>& after_backward() const { return after_backward_; }
-  void add_after_backward(Callback* value) {
-    after_backward_.push_back(value);
+  /// @brief set a Solver for this net
+  void SetSolver(Solver<Dtype>* s) {
+    solver_ = s;
   }
 
  protected:
@@ -303,6 +286,8 @@ class Net {
   vector<int> param_owners_;
   vector<string> param_display_names_;
   vector<pair<int, int> > param_layer_indices_;
+  /// (layer, blob) -> param_id map
+  map<pair<int, int>, int> layer_index_params_;
   map<string, int> param_names_index_;
   /// blob indices for the input and the output of the net
   vector<int> net_input_blob_indices_;
@@ -330,13 +315,11 @@ class Net {
   size_t memory_used_;
   /// Whether to compute and display debug info for the net.
   bool debug_info_;
-  // Callbacks
-  vector<Callback*> before_forward_;
-  vector<Callback*> after_forward_;
-  vector<Callback*> before_backward_;
-  vector<Callback*> after_backward_;
-
-DISABLE_COPY_AND_ASSIGN(Net);
+  /// The root net that actually holds the shared layers in data parallelism
+  const Net* const root_net_;
+  /// Pointer to the solver being used with this net
+  Solver<Dtype>* solver_;
+  DISABLE_COPY_AND_ASSIGN(Net);
 };
 
 

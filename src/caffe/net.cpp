@@ -17,37 +17,38 @@
 #include "caffe/util/math_functions.hpp"
 #include "caffe/util/upgrade_proto.hpp"
 
+#include "caffe/test/test_caffe_main.hpp"
+
 namespace caffe {
 
 template <typename Dtype>
-Net<Dtype>::Net(const NetParameter& param) {
+Net<Dtype>::Net(const NetParameter& param, const Net* root_net)
+    : root_net_(root_net) {
   Init(param);
 }
 
 template <typename Dtype>
-Net<Dtype>::Net(const string& param_file, Phase phase,
-    const int level, const vector<string>* stages) {
+Net<Dtype>::Net(const string& param_file, Phase phase, const Net* root_net)
+    : root_net_(root_net) {
   NetParameter param;
   ReadNetParamsFromTextFileOrDie(param_file, &param);
-  // Set phase, stages and level
   param.mutable_state()->set_phase(phase);
-  if (stages != NULL) {
-    for (int i = 0; i < stages->size(); i++) {
-      param.mutable_state()->add_stage((*stages)[i]);
-    }
-  }
-  param.mutable_state()->set_level(level);
   Init(param);
 }
 
 template <typename Dtype>
 void Net<Dtype>::Init(const NetParameter& in_param) {
+  CHECK(Caffe::root_solver() || root_net_)
+      << "root_net_ needs to be set for all non-root solvers";
   // Set phase from the state.
   phase_ = in_param.state().phase();
   // Filter layers based on their include/exclude rules and
   // the current NetState.
   NetParameter filtered_param;
   FilterNet(in_param, &filtered_param);
+  if (phase_ == TRAIN) {
+    caffe::P2PSync<Dtype>::divide_batch_size(&filtered_param);
+  }
   LOG_IF(INFO, Caffe::root_solver())
       << "Initializing net from parameters: " << std::endl
       << filtered_param.DebugString();
@@ -67,6 +68,9 @@ void Net<Dtype>::Init(const NetParameter& in_param) {
   top_id_vecs_.resize(param.layer_size());
   bottom_need_backward_.resize(param.layer_size());
   for (int layer_id = 0; layer_id < param.layer_size(); ++layer_id) {
+    // For non-root solvers, whether this layer is shared from root_net_.
+    bool share_from_root = !Caffe::root_solver()
+        && root_net_->layers_[layer_id]->ShareInParallel();
     // Inherit phase from net if unset.
     if (!param.layer(layer_id).has_phase()) {
       param.mutable_layer(layer_id)->set_phase(phase_);
@@ -79,7 +83,13 @@ void Net<Dtype>::Init(const NetParameter& in_param) {
           << "propagate_down param must be specified "
           << "either 0 or bottom_size times ";
     }
-    layers_.push_back(LayerRegistry<Dtype>::CreateLayer(layer_param));
+    if (share_from_root) {
+      LOG(INFO) << "Sharing layer " << layer_param.name() << " from root net";
+      layers_.push_back(root_net_->layers_[layer_id]);
+      layers_[layer_id]->SetShared(true);
+    } else {
+      layers_.push_back(LayerRegistry<Dtype>::CreateLayer(layer_param));
+    }
     layer_names_.push_back(layer_param.name());
     LOG_IF(INFO, Caffe::root_solver())
         << "Creating Layer " << layer_param.name();
@@ -118,7 +128,19 @@ void Net<Dtype>::Init(const NetParameter& in_param) {
       }
     }
     // After this layer is connected, set it up.
-    layers_[layer_id]->SetUp(bottom_vecs_[layer_id], top_vecs_[layer_id]);
+    if (share_from_root) {
+      // Set up size of top blobs using root_net_
+      const vector<Blob<Dtype>*>& base_top = root_net_->top_vecs_[layer_id];
+      const vector<Blob<Dtype>*>& this_top = this->top_vecs_[layer_id];
+      for (int top_id = 0; top_id < base_top.size(); ++top_id) {
+        this_top[top_id]->ReshapeLike(*base_top[top_id]);
+        LOG(INFO) << "Created top blob " << top_id << " (shape: "
+            << this_top[top_id]->shape_string() <<  ") for shared layer "
+            << layer_param.name();
+      }
+    } else {
+      layers_[layer_id]->SetUp(bottom_vecs_[layer_id], top_vecs_[layer_id]);
+    }
     LOG_IF(INFO, Caffe::root_solver())
         << "Setting up " << layer_names_[layer_id];
     for (int top_id = 0; top_id < top_vecs_[layer_id].size(); ++top_id) {
@@ -251,6 +273,13 @@ void Net<Dtype>::Init(const NetParameter& in_param) {
     layer_names_index_[layer_names_[layer_id]] = layer_id;
   }
   ShareWeights();
+
+  // invert param_layer_indices_ to give map of
+  // (level_id, local param_id) -> global param_id
+  for (int i = 0; i < param_layer_indices_.size(); ++i) {
+    layer_index_params_[param_layer_indices_[i]] = i;
+  }
+
   debug_info_ = param.debug_info();
   LOG_IF(INFO, Caffe::root_solver()) << "Network initialization done.";
 }
@@ -518,15 +547,10 @@ Dtype Net<Dtype>::ForwardFromTo(int start, int end) {
   CHECK_LT(end, layers_.size());
   Dtype loss = 0;
   for (int i = start; i <= end; ++i) {
-    for (int c = 0; c < before_forward_.size(); ++c) {
-      before_forward_[c]->run(i);
-    }
+    // LOG(ERROR) << "Forwarding " << layer_names_[i];
     Dtype layer_loss = layers_[i]->Forward(bottom_vecs_[i], top_vecs_[i]);
     loss += layer_loss;
     if (debug_info_) { ForwardDebugInfo(i); }
-    for (int c = 0; c < after_forward_.size(); ++c) {
-      after_forward_[c]->run(i);
-    }
   }
   return loss;
 }
@@ -568,16 +592,39 @@ void Net<Dtype>::BackwardFromTo(int start, int end) {
   CHECK_GE(end, 0);
   CHECK_LT(start, layers_.size());
   for (int i = start; i >= end; --i) {
-    for (int c = 0; c < before_backward_.size(); ++c) {
-      before_backward_[c]->run(i);
-    }
     if (layer_need_backward_[i]) {
       layers_[i]->Backward(
           top_vecs_[i], bottom_need_backward_[i], bottom_vecs_[i]);
       if (debug_info_) { BackwardDebugInfo(i); }
-    }
-    for (int c = 0; c < after_backward_.size(); ++c) {
-      after_backward_[c]->run(i);
+
+      // reduce gradients as soon as they are ready
+      if (Caffe::solver_count() > 1) {
+#ifndef CPU_ONLY
+        CUDA_CHECK(cudaStreamSynchronize(cudaStreamDefault));
+#endif
+        for (int j = 0; j < layers_[i]->blobs().size(); ++j) {
+          int param_id = layer_index_params_[make_pair(i, j)];
+
+          // check if we need to synchronize after reduction
+          bool need_sync = false;
+          // If param has been split, update owner and sync
+          if (param_owners_[param_id] >= 0) {
+            param_id = param_owners_[param_id];
+            need_sync = true;
+          }
+
+          for (int k = 0; k < solver_->callbacks().size(); ++k) {
+            solver_->callbacks()[k]->allreduce(param_id);
+          }
+
+          // perform synchronization if needed
+          if (need_sync) {
+            for (int k = 0; k < solver_->callbacks().size(); ++k) {
+              solver_->callbacks()[k]->syncCommStream();
+            }
+          }
+        }
+      }
     }
   }
 }
@@ -769,7 +816,8 @@ void Net<Dtype>::CopyTrainedLayersFrom(const NetParameter& param) {
 
 template <typename Dtype>
 void Net<Dtype>::CopyTrainedLayersFrom(const string trained_filename) {
-  if (H5Fis_hdf5(trained_filename.c_str())) {
+  if (trained_filename.size() >= 3 &&
+      trained_filename.compare(trained_filename.size() - 3, 3, ".h5") == 0) {
     CopyTrainedLayersFromHDF5(trained_filename);
   } else {
     CopyTrainedLayersFromBinaryProto(trained_filename);

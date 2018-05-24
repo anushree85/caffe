@@ -24,22 +24,27 @@ else
 	OTHER_BUILD_DIR := $(DEBUG_BUILD_DIR)
 endif
 
+THIRDPARTY_DIR := ./3rdparty
+
 # All of the directories containing code.
 SRC_DIRS := $(shell find * -type d -exec bash -c "find {} -maxdepth 1 \
 	\( -name '*.cpp' -o -name '*.proto' \) | grep -q ." \; -print)
 
 # The target shared library name
-LIBRARY_NAME := $(PROJECT)
+LIBRARY_NAME := $(PROJECT)$(LIBRARY_NAME_SUFFIX)
 LIB_BUILD_DIR := $(BUILD_DIR)/lib
 STATIC_NAME := $(LIB_BUILD_DIR)/lib$(LIBRARY_NAME).a
-DYNAMIC_VERSION_MAJOR 		:= 1
-DYNAMIC_VERSION_MINOR 		:= 0
-DYNAMIC_VERSION_REVISION 	:= 0
+DYNAMIC_VERSION_MAJOR 		:= 0
+DYNAMIC_VERSION_MINOR 		:= 15
+DYNAMIC_VERSION_REVISION 	:= 14
 DYNAMIC_NAME_SHORT := lib$(LIBRARY_NAME).so
-#DYNAMIC_SONAME_SHORT := $(DYNAMIC_NAME_SHORT).$(DYNAMIC_VERSION_MAJOR)
-DYNAMIC_VERSIONED_NAME_SHORT := $(DYNAMIC_NAME_SHORT).$(DYNAMIC_VERSION_MAJOR).$(DYNAMIC_VERSION_MINOR).$(DYNAMIC_VERSION_REVISION)
+DYNAMIC_SONAME_SHORT := $(DYNAMIC_NAME_SHORT).$(DYNAMIC_VERSION_MAJOR).$(DYNAMIC_VERSION_MINOR)
+DYNAMIC_VERSIONED_NAME_SHORT := $(DYNAMIC_SONAME_SHORT).$(DYNAMIC_VERSION_REVISION)
 DYNAMIC_NAME := $(LIB_BUILD_DIR)/$(DYNAMIC_VERSIONED_NAME_SHORT)
 COMMON_FLAGS += -DCAFFE_VERSION=$(DYNAMIC_VERSION_MAJOR).$(DYNAMIC_VERSION_MINOR).$(DYNAMIC_VERSION_REVISION)
+# NVCaffe requires C++ 11
+COMMON_FLAGS += -std=c++11
+COMMON_FLAGS += -DCUDA_NO_HALF
 
 ##############################
 # Get all source files
@@ -168,17 +173,23 @@ CUDA_LIB_DIR :=
 # add <cuda>/lib64 only if it exists
 ifneq ("$(wildcard $(CUDA_DIR)/lib64)","")
 	CUDA_LIB_DIR += $(CUDA_DIR)/lib64
+	CUDA_LIB_DIR += /usr/lib/nvidia-384 /usr/lib/nvidia-381 /usr/lib/nvidia-375 /usr/lib/nvidia-367 /usr/lib/nvidia-361 /usr/lib/nvidia-352
 endif
 CUDA_LIB_DIR += $(CUDA_DIR)/lib
 
-INCLUDE_DIRS += $(BUILD_INCLUDE_DIR) ./src ./include
+INCLUDE_DIRS += $(BUILD_INCLUDE_DIR) ./src ./include $(THIRDPARTY_DIR)
 ifneq ($(CPU_ONLY), 1)
 	INCLUDE_DIRS += $(CUDA_INCLUDE_DIR)
 	LIBRARY_DIRS += $(CUDA_LIB_DIR)
 	LIBRARIES := cudart cublas curand
+ifneq ($(NO_NVML), 1)
+	LIBRARIES += nvidia-ml
+endif
 endif
 
+
 LIBRARIES += glog gflags protobuf boost_system boost_filesystem m hdf5_hl hdf5
+
 
 # handle IO dependencies
 USE_LEVELDB ?= 1
@@ -192,12 +203,12 @@ ifeq ($(USE_LMDB), 1)
 	LIBRARIES += lmdb
 endif
 ifeq ($(USE_OPENCV), 1)
-	LIBRARIES += opencv_core opencv_highgui opencv_imgproc
+	LIBRARIES += opencv_core opencv_highgui opencv_imgproc 
 
 	ifeq ($(OPENCV_VERSION), 3)
 		LIBRARIES += opencv_imgcodecs
 	endif
-
+		
 endif
 PYTHON_LIBRARIES ?= boost_python python2.7
 WARNINGS := -Wall -Wno-sign-compare
@@ -263,7 +274,7 @@ ifeq ($(LINUX), 1)
 	# boost::thread is reasonably called boost_thread (compare OS X)
 	# We will also explicitly add stdc++ to the link target.
 	LIBRARIES += boost_thread stdc++
-	VERSIONFLAGS += -Wl,-soname,$(DYNAMIC_VERSIONED_NAME_SHORT) -Wl,-rpath,$(ORIGIN)/../lib
+	VERSIONFLAGS += -Wl,-soname,$(DYNAMIC_SONAME_SHORT) -Wl,-rpath,$(ORIGIN)/../lib
 endif
 
 # OS X:
@@ -272,7 +283,7 @@ endif
 ifeq ($(OSX), 1)
 	CXX := /usr/bin/clang++
 	ifneq ($(CPU_ONLY), 1)
-		CUDA_VERSION := $(shell $(CUDA_DIR)/bin/nvcc -V | grep -o 'release [0-9.]*' | tr -d '[a-z ]')
+		CUDA_VERSION := $(shell $(CUDA_DIR)/bin/nvcc -V | grep -o 'release [0-9.]*' | grep -o '[0-9.]*')
 		ifeq ($(shell echo | awk '{exit $(CUDA_VERSION) < 7.0;}'), 1)
 			CXXFLAGS += -stdlib=libstdc++
 			LINKFLAGS += -stdlib=libstdc++
@@ -294,7 +305,7 @@ ifeq ($(OSX), 1)
 	LIBRARIES += boost_thread-mt
 	# we need to explicitly ask for the rpath to be obeyed
 	ORIGIN := @loader_path
-	VERSIONFLAGS += -Wl,-install_name,@rpath/$(DYNAMIC_VERSIONED_NAME_SHORT) -Wl,-rpath,$(ORIGIN)/../../build/lib
+	VERSIONFLAGS += -Wl,-install_name,$(DYNAMIC_SONAME_SHORT) -Wl,-rpath,$(ORIGIN)/../../build/lib
 else
 	ORIGIN := \$$ORIGIN
 endif
@@ -305,14 +316,14 @@ ifdef CUSTOM_CXX
 endif
 
 # Static linking
-ifneq (,$(findstring clang++,$(CXX)))
-	STATIC_LINK_COMMAND := -Wl,-force_load $(STATIC_NAME)
-else ifneq (,$(findstring g++,$(CXX)))
+#ifneq (,$(findstring clang++,$(CXX)))
+#	STATIC_LINK_COMMAND := -Wl,-force_load $(STATIC_NAME)
+#else ifneq (,$(findstring g++,$(CXX)))
 	STATIC_LINK_COMMAND := -Wl,--whole-archive $(STATIC_NAME) -Wl,--no-whole-archive
-else
-  # The following line must not be indented with a tab, since we are not inside a target
-  $(error Cannot static link with the $(CXX) compiler)
-endif
+#else
+#  # The following line must not be indented with a tab, since we are not inside a target
+#  $(error Cannot static link with the $(CXX) compiler)
+#endif
 
 # Debugging
 ifeq ($(DEBUG), 1)
@@ -324,7 +335,12 @@ endif
 
 # cuDNN acceleration configuration.
 ifeq ($(USE_CUDNN), 1)
+	ifdef CUDNN_ROOT
+		CUDNN_DIR := $(CUDNN_ROOT)
+	endif
 	LIBRARIES += cudnn
+	INCLUDE_DIRS += $(CUDNN_DIR)/cuda/include $(CUDNN_DIR)/include $(CUDNN_DIR)
+	LIBRARY_DIRS += $(CUDNN_DIR)/cuda/lib64 $(CUDNN_DIR)/lib64 $(CUDNN_DIR)
 	COMMON_FLAGS += -DUSE_CUDNN
 endif
 
@@ -358,6 +374,14 @@ ifeq ($(CPU_ONLY), 1)
 	COMMON_FLAGS += -DCPU_ONLY
 endif
 
+ifeq ($(NO_NVML), 1)
+	COMMON_FLAGS += -DNO_NVML=1
+endif
+
+ifeq ($(TEST_FP16), 1)
+	COMMON_FLAGS += -DTEST_FP16=1
+endif
+
 # Python layer support
 ifeq ($(WITH_PYTHON_LAYER), 1)
 	COMMON_FLAGS += -DWITH_PYTHON_LAYER
@@ -388,11 +412,8 @@ else
 		LIBRARIES += cblas
 		# 10.10 has accelerate while 10.9 has veclib
 		XCODE_CLT_VER := $(shell pkgutil --pkg-info=com.apple.pkg.CLTools_Executables | grep 'version' | sed 's/[^0-9]*\([0-9]\).*/\1/')
-		XCODE_CLT_GEQ_7 := $(shell [ $(XCODE_CLT_VER) -gt 6 ] && echo 1)
 		XCODE_CLT_GEQ_6 := $(shell [ $(XCODE_CLT_VER) -gt 5 ] && echo 1)
-		ifeq ($(XCODE_CLT_GEQ_7), 1)
-			BLAS_INCLUDE ?= /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/$(shell ls /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/ | sort | tail -1)/System/Library/Frameworks/Accelerate.framework/Versions/A/Frameworks/vecLib.framework/Versions/A/Headers
-		else ifeq ($(XCODE_CLT_GEQ_6), 1)
+		ifeq ($(XCODE_CLT_GEQ_6), 1)
 			BLAS_INCLUDE ?= /System/Library/Frameworks/Accelerate.framework/Versions/Current/Frameworks/vecLib.framework/Headers/
 			LDFLAGS += -framework Accelerate
 		else
@@ -454,7 +475,8 @@ endif
 
 all: lib tools examples
 
-lib: $(STATIC_NAME) $(DYNAMIC_NAME)
+lib: $(STATIC_NAME) 
+	#$(DYNAMIC_NAME)
 
 everything: $(EVERYTHING_TARGETS)
 
@@ -487,7 +509,7 @@ $(EMPTY_LINT_REPORT): $(LINT_OUTPUTS) | $(BUILD_DIR)
 
 $(LINT_OUTPUTS): $(LINT_OUTPUT_DIR)/%.lint.txt : % $(LINT_SCRIPT) | $(LINT_OUTPUT_DIR)
 	@ mkdir -p $(dir $@)
-	@ python $(LINT_SCRIPT) $< 2>&1 \
+	@ python $(LINT_SCRIPT) --filter=-legal,-build/include,-runtime/references,-readability,-whitespace/comments $< 2>&1 \
 		| grep -v "^Done processing " \
 		| grep -v "^Total errors found: 0" \
 		> $@ \
@@ -568,10 +590,11 @@ $(BUILD_DIR)/.linked:
 $(ALL_BUILD_DIRS): | $(BUILD_DIR_LINK)
 	@ mkdir -p $@
 
-$(DYNAMIC_NAME): $(OBJS) | $(LIB_BUILD_DIR)
-	@ echo LD -o $@
-	$(Q)$(CXX) -shared -o $@ $(OBJS) $(VERSIONFLAGS) $(LINKFLAGS) $(LDFLAGS)
-	@ cd $(BUILD_DIR)/lib; rm -f $(DYNAMIC_NAME_SHORT);   ln -s $(DYNAMIC_VERSIONED_NAME_SHORT) $(DYNAMIC_NAME_SHORT)
+#$(DYNAMIC_NAME): $(OBJS) | $(LIB_BUILD_DIR)
+#	@ echo LD -o $@
+#	$(Q)$(CXX) -shared -o $@ $(OBJS) $(VERSIONFLAGS) $(LINKFLAGS) $(LDFLAGS) $(DYNAMIC_FLAGS)
+#	@ cd $(BUILD_DIR)/lib; rm -f $(DYNAMIC_SONAME_SHORT); ln -s $(DYNAMIC_VERSIONED_NAME_SHORT) $(DYNAMIC_SONAME_SHORT)
+#	@ cd $(BUILD_DIR)/lib; rm -f $(DYNAMIC_NAME_SHORT);   ln -s $(DYNAMIC_SONAME_SHORT) $(DYNAMIC_NAME_SHORT)
 
 $(STATIC_NAME): $(OBJS) | $(LIB_BUILD_DIR)
 	@ echo AR -o $@
@@ -621,12 +644,12 @@ $(TOOL_BUILD_DIR)/%: $(TOOL_BUILD_DIR)/%.bin | $(TOOL_BUILD_DIR)
 	@ $(RM) $@
 	@ ln -s $(notdir $<) $@
 
-$(TOOL_BINS): %.bin : %.o | $(DYNAMIC_NAME)
+$(TOOL_BINS): %.bin : %.o | $(STATIC_NAME)
 	@ echo CXX/LD -o $@
-	$(Q)$(CXX) $< -o $@ $(LINKFLAGS) -l$(LIBRARY_NAME) $(LDFLAGS) \
+	$(Q)$(CXX) $< -o $@ $(LINKFLAGS) -Wl,--whole-archive build/lib/libcaffe-nv.a -Wl,--no-whole-archive $(LDFLAGS) \
 		-Wl,-rpath,$(ORIGIN)/../lib
 
-$(EXAMPLE_BINS): %.bin : %.o | $(DYNAMIC_NAME)
+$(EXAMPLE_BINS): %.bin : %.o | $(STATIC_NAME)
 	@ echo CXX/LD -o $@
 	$(Q)$(CXX) $< -o $@ $(LINKFLAGS) -l$(LIBRARY_NAME) $(LDFLAGS) \
 		-Wl,-rpath,$(ORIGIN)/../../lib
@@ -692,8 +715,9 @@ $(DISTRIBUTE_DIR): all py | $(DISTRIBUTE_SUBDIRS)
 	# add libraries
 	cp $(STATIC_NAME) $(DISTRIBUTE_DIR)/lib
 	install -m 644 $(DYNAMIC_NAME) $(DISTRIBUTE_DIR)/lib
-	cd $(DISTRIBUTE_DIR)/lib; rm -f $(DYNAMIC_NAME_SHORT);   ln -s $(DYNAMIC_VERSIONED_NAME_SHORT) $(DYNAMIC_NAME_SHORT)
+	cd $(DISTRIBUTE_DIR)/lib; rm -f $(DYNAMIC_SONAME_SHORT); ln -s $(DYNAMIC_VERSIONED_NAME_SHORT) $(DYNAMIC_SONAME_SHORT)
+	cd $(DISTRIBUTE_DIR)/lib; rm -f $(DYNAMIC_NAME_SHORT);   ln -s $(DYNAMIC_SONAME_SHORT) $(DYNAMIC_NAME_SHORT)
 	# add python - it's not the standard way, indeed...
-	cp -r python $(DISTRIBUTE_DIR)/
+	cp -r python $(DISTRIBUTE_DIR)/python
 
 -include $(DEPS)
