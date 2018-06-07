@@ -18,8 +18,9 @@ using std::endl;
   #include "caffe_config.h"
 #else
   #define CUDA_TEST_DEVICE -1
+  #define CMAKE_SOURCE_DIR "src/"
   #define EXAMPLES_SOURCE_DIR "examples/"
-  #define ABS_TEST_DATA_DIR "src/caffe/test/test_data"
+  #define CMAKE_EXT ""
 #endif
 
 int main(int argc, char** argv);
@@ -39,36 +40,34 @@ class MultiDeviceTest : public ::testing::Test {
 
 typedef ::testing::Types<float, double> TestDtypes;
 
-template <typename TypeParam>
-struct CPUDevice {
-  typedef TypeParam Dtype;
+struct FloatCPU {
+  typedef float Dtype;
   static const Caffe::Brew device = Caffe::CPU;
 };
 
-template <typename Dtype>
-class CPUDeviceTest : public MultiDeviceTest<CPUDevice<Dtype> > {
+struct DoubleCPU {
+  typedef double Dtype;
+  static const Caffe::Brew device = Caffe::CPU;
 };
 
 #ifdef CPU_ONLY
 
-typedef ::testing::Types<CPUDevice<float>,
-                         CPUDevice<double> > TestDtypesAndDevices;
+typedef ::testing::Types<FloatCPU, DoubleCPU> TestDtypesAndDevices;
 
 #else
 
-template <typename TypeParam>
-struct GPUDevice {
-  typedef TypeParam Dtype;
+struct FloatGPU {
+  typedef float Dtype;
   static const Caffe::Brew device = Caffe::GPU;
 };
 
-template <typename Dtype>
-class GPUDeviceTest : public MultiDeviceTest<GPUDevice<Dtype> > {
+struct DoubleGPU {
+  typedef double Dtype;
+  static const Caffe::Brew device = Caffe::GPU;
 };
 
-typedef ::testing::Types<CPUDevice<float>, CPUDevice<double>,
-                         GPUDevice<float>, GPUDevice<double> >
-                         TestDtypesAndDevices;
+typedef ::testing::Types<FloatCPU, DoubleCPU, FloatGPU, DoubleGPU>
+    TestDtypesAndDevices;
 
 #endif
 
