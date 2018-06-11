@@ -1,31 +1,73 @@
-file(GLOB_RECURSE examples_srcs "${PROJECT_SOURCE_DIR}/examples/*.cpp")
+cmake_minimum_required(VERSION 2.8.7)
 
-foreach(source_file ${examples_srcs})
-  # get file name
-  get_filename_component(name ${source_file} NAME_WE)
-    
-  # get folder name
-  get_filename_component(path ${source_file} PATH)
-  get_filename_component(folder ${path} NAME_WE)
-    
-  add_executable(${name} ${source_file})
-  target_link_libraries(${name} ${Caffe_LINK})
-  caffe_default_properties(${name})
+# ---[ Caffe project
+project(Caffe C CXX)
 
-  # set back RUNTIME_OUTPUT_DIRECTORY
-  set_target_properties(${name} PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/examples/${folder}")
+# ---[ Using cmake scripts and modules
+list(APPEND CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake/Modules)
 
-  caffe_set_solution_folder(${name} examples)
+include(ExternalProject)
 
-  # install
-  install(TARGETS ${name} DESTINATION bin)
+include(cmake/Utils.cmake)
+include(cmake/Targets.cmake)
+include(cmake/Misc.cmake)
+include(cmake/Summary.cmake)
+include(cmake/ConfigGen.cmake)
 
-  if(UNIX OR APPLE)
-    # Funny command to make tutorials work
-    # TODO: remove in future as soon as naming is standartaized everywhere
-    set(__outname ${PROJECT_BINARY_DIR}/examples/${folder}/${name}${CAffe_POSTFIX})
-    add_custom_command(TARGET ${name} POST_BUILD
-                       COMMAND ln -sf "${__outname}" "${__outname}.bin")
-  endif()
-endforeach()
+# ---[ Options
+caffe_option(CPU_ONLY  "Build Caffe without CUDA support" OFF) # TODO: rename to USE_CUDA
+caffe_option(USE_CUDNN "Build Caffe with cuDNN libary support" ON IF NOT CPU_ONLY)
+caffe_option(BUILD_SHARED_LIBS "Build shared libraries" ON)
+caffe_option(BUILD_python "Build Python wrapper" ON)
+set(python_version "2" CACHE STRING "Specify which python version to use")
+caffe_option(BUILD_matlab "Build Matlab wrapper" OFF IF UNIX OR APPLE)
+caffe_option(BUILD_docs   "Build documentation" ON IF UNIX OR APPLE)
+caffe_option(BUILD_python_layer "Build the Caffe python layer" ON)
+
+# ---[ Dependencies
+include(cmake/Dependencies.cmake)
+
+# ---[ Flags
+if(UNIX OR APPLE)
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fPIC -Wall")
+endif()
+
+if(USE_libstdcpp)
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -stdlib=libstdc++")
+  message("-- Warning: forcing libstdc++ (controlled by USE_libstdcpp option in cmake)")
+endif()
+
+add_definitions(-DGTEST_USE_OWN_TR1_TUPLE)
+
+# ---[ Warnings
+caffe_warnings_disable(CMAKE_CXX_FLAGS -Wno-sign-compare -Wno-uninitialized)
+
+# ---[ Config generation
+configure_file(cmake/Templates/caffe_config.h.in "${PROJECT_BINARY_DIR}/caffe_config.h")
+
+# ---[ Includes
+set(Caffe_INCLUDE_DIR ${PROJECT_SOURCE_DIR}/include)
+include_directories(${Caffe_INCLUDE_DIR} ${PROJECT_BINARY_DIR})
+include_directories(BEFORE src) # This is needed for gtest.
+
+# ---[ Subdirectories
+add_subdirectory(src/gtest)
+add_subdirectory(src/caffe)
+add_subdirectory(tools)
+add_subdirectory(examples)
+add_subdirectory(python)
+add_subdirectory(matlab)
+add_subdirectory(docs)
+
+# ---[ Linter target
+add_custom_target(lint COMMAND ${CMAKE_COMMAND} -P ${PROJECT_SOURCE_DIR}/cmake/lint.cmake)
+
+# ---[ pytest target
+add_custom_target(pytest COMMAND python${python_version} -m unittest discover -s caffe/test WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}/python )
+add_dependencies(pytest pycaffe)
+
+# ---[ Configuration summary
+caffe_print_configuration_summary()
+
+# ---[ Export configs generation
+caffe_generate_export_configs()
